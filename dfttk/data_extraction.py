@@ -110,11 +110,11 @@ def extract_atomic_masses(outcar_path: str) -> float:
         for line in lines:
             if "TITEL" in line:
                 atoms.append(line.split()[-2])
-            elif "POMASS" in line:
+            elif "POMASS" and "mass and valenz" in line:
                 mass = line.split()[2].replace(';', '')
                 masses.append(float(mass))
                 
-    # Clean atoms so that only the species is containted. e.g. 'Fe_pv' -> 'Fe'
+    # Clean atoms so that only the species is contained. e.g. 'Fe_pv' -> 'Fe'
     atoms = [atom.split('_')[0] for atom in atoms]
     
     atomic_masses = dict(zip(atoms, masses))

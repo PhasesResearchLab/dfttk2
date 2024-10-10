@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import scipy.constants
 from scipy.special import expit
 from natsort import natsorted
+from scipy.interpolate import UnivariateSpline
 
 # Local application/library specific imports
 from pymatgen.io.vasp.outputs import Vasprun
@@ -111,6 +112,43 @@ def plot_total_electron_dos(electron_dos_data: pd.DataFrame):
         ytitle=f"DOS (states/eV/{electron_dos_data['number_of_atoms'].iloc[i]} atoms)",
     )
     fig.show()
+
+
+def fit_electron_dos(
+    energy: pd.Series | np.ndarray,
+    dos: pd.Series | np.ndarray,
+    energy_range: list[float, float],
+    resolution: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fits the electron DOS with a spline
+
+    Args:
+        energy (pd.Series | np.ndarray): energy values from the electron DOS
+        dos (pd.Series | np.ndarray): electron DOS values
+        energy_range (list[float, float]): energy range to fit the electron DOS
+        resolution (float): energy resolution for the spline
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: fitted energy and DOS values
+    """
+
+    # Check if energy and dos are pandas Series and convert to NumPy arrays if necessary
+    if isinstance(energy, pd.Series):
+        energy = energy.values[0]
+    if isinstance(dos, pd.Series):
+        dos = dos.values[0]
+
+    # Filter the energy and dos values within the energy range
+    filtered_indices = (energy >= energy_range[0]) & (energy <= energy_range[1])
+    filtered_energy = energy[filtered_indices]
+    filtered_dos = dos[filtered_indices]
+
+    # Fit the filtered energy and dos values with a spline
+    spline = UnivariateSpline(filtered_energy, filtered_dos, s=0)
+    energy_fit = np.arange(energy_range[0], energy_range[1] + resolution, resolution)
+    dos_fit = spline(energy_fit)
+
+    return energy_fit, dos_fit
 
 
 def fermi_dirac_distribution(
@@ -274,6 +312,9 @@ def calculate_internal_energy(
     energy: pd.Series | np.ndarray,
     dos: pd.Series | np.ndarray,
     temperature_range: np.ndarray,
+    resolution: float = 0.001,
+    plot: bool = False,
+    plot_temperatures: np.ndarray = None,
 ) -> list:
     """Calculates the thermal electronic contribution to the internal energy
 
@@ -281,6 +322,9 @@ def calculate_internal_energy(
         energy (pd.Series | np.ndarray): energy values from the electron DOS
         dos (pd.Series | np.ndarray): electron DOS values
         temperature_range (np.ndarray): temperature range
+        resolution (float, optional): energy resolution for the spline. Defaults to 0.001.
+        plot (bool, optional): plots the integrand vs energy of the internal energy equation. Defaults to False.
+        plot_temperatures (np.ndarray, optional): temperatures to plot the integrand vs energy of the internal energy equation. Defaults to None.
 
     Returns:
         list: thermal electronic contribution to the internal energy
@@ -292,38 +336,107 @@ def calculate_internal_energy(
     if isinstance(dos, pd.Series):
         dos = dos.values[0]
 
+    energy_fit, dos_fit = fit_electron_dos(
+        energy, dos, [np.min(energy), np.max(energy)], resolution
+    )
+    integrand_1_list = []
+    filtered_energy_list = []
+    integrand_2_list = []
     E_el_list = []
     for temperature in temperature_range:
-        if temperature == 0:
-            E_el = 0
-            E_el_list.append(E_el)
-        
-        elif temperature > 0:
-            chemical_potential = calculate_chemical_potential(energy, dos, temperature)
-            fermi_dist = fermi_dirac_distribution(energy, chemical_potential, temperature)
+        chemical_potential = calculate_chemical_potential(
+            energy_fit, dos_fit, temperature
+        )
+        fermi_dist = fermi_dirac_distribution(
+            energy_fit, chemical_potential, temperature
+        )
 
-            integrand_1 = dos * fermi_dist * energy
-            integral_1 = np.trapz(integrand_1, energy)
+        integrand_1 = dos_fit * fermi_dist * energy_fit
+        integrand_1_list.append(integrand_1)
+        integral_1 = np.trapz(integrand_1, energy_fit)
 
-            # Only integrate over energy levels less than the chemical potential
-            mask = energy < chemical_potential
-            filtered_energy = energy[mask]
-            filtered_dos = dos[mask]
+        # Only integrate over energy levels less than the chemical potential
+        mask = energy_fit < chemical_potential
+        filtered_energy = energy_fit[mask]
+        filtered_energy_list.append(filtered_energy)
+        filtered_dos = dos_fit[mask]
 
-            integrand_2 = filtered_dos * filtered_energy
-            integral_2 = np.trapz(integrand_2, filtered_energy)
+        integrand_2 = filtered_dos * filtered_energy
+        integrand_2_list.append(integrand_2)
+        integral_2 = np.trapz(integrand_2, filtered_energy)
 
-            E_el = integral_1 - integral_2
-            E_el_list.append(E_el)
+        E_el = integral_1 - integral_2
+        E_el_list.append(E_el)
+
+    if plot:
+        for plot_temperature in plot_temperatures:
+            index = np.where(temperature_range == plot_temperature)[0][0]
+
+            plot_internal_energy_integral(
+                energy_fit,
+                integrand_1_list[index],
+                filtered_energy_list[index],
+                integrand_2_list[index],
+                plot_temperature,
+            )
 
     return E_el_list
+
+
+def plot_internal_energy_integral(
+    energy: np.ndarray,
+    integrand_1: np.ndarray,
+    filtered_energy: np.ndarray,
+    integrand_2: np.ndarray,
+    plot_temperature: float,
+):
+    """Plots the integrand vs energy of the internal energy equation
+
+    Args:
+        energy (np.ndarray): energy values from the electron DOS
+        integrand_1 (np.ndarray): integrand 1 from the internal energy equation
+        filtered_energy (np.ndarray): filtered energy values from the electron DOS
+        integrand_2 (np.ndarray): integrand 2 from the internal energy equation
+        plot_temperature (float): temperature
+    """
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=energy, y=integrand_1, mode="markers"))
+    fig.update_layout(
+        title=dict(
+            text=f"T = {plot_temperature} K",
+            font=dict(size=20, color="rgb(0,0,0)"),
+        ),
+        margin=dict(t=130),
+    )
+    plot_format(
+        fig, xtitle="E - E<sub>F</sub> (eV)", ytitle="E<sub>el</sub> integrand 1"
+    )
+    fig.show()
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=filtered_energy, y=integrand_2, mode="markers"))
+    fig.update_layout(
+        title=dict(
+            text=f"T = {plot_temperature} K",
+            font=dict(size=20, color="rgb(0,0,0)"),
+        ),
+        margin=dict(t=130),
+    )
+    plot_format(
+        fig, xtitle="E - E<sub>F</sub> (eV)", ytitle="E<sub>el</sub> integrand 2"
+    )
+    fig.show()
 
 
 def calculate_entropy(
     energy: pd.Series | np.ndarray,
     dos: pd.Series | np.ndarray,
     temperature_range: np.ndarray,
-    plot=False,
+    energy_range: list[float, float] = [-2, 2],
+    resolution: float = 0.0001,
+    plot: bool = False,
+    plot_temperatures: np.ndarray = None,
 ) -> list:
     """Calculates the thermal electronic contribution to the entropy
 
@@ -331,7 +444,10 @@ def calculate_entropy(
         energy (pd.Series | np.ndarray): energy values from the electron DOS
         dos (pd.Series | np.ndarray): electron DOS values
         temperature_range (np.ndarray): temperature range
+        energy_range (list[float, float], optional): energy range to fit the electron DOS. Defaults to [-2, 2].
+        resolution (float, optional): energy resolution for the spline. Defaults to 0.0001.
         plot (bool, optional): plots the integrand vs energy of the entropy equation. Defaults to False.
+        plot_temperatures (np.ndarray, optional): temperatures to plot the integrand vs energy of the entropy equation. Defaults to None.
 
     Returns:
         list: thermal electronic contribution to the entropy
@@ -343,45 +459,68 @@ def calculate_entropy(
     if isinstance(dos, pd.Series):
         dos = dos.values[0]
 
+    energy_fit, dos_fit = fit_electron_dos(energy, dos, energy_range, resolution)
+
+    integrand_list = []
     S_el_list = []
     for temperature in temperature_range:
         if temperature == 0:
             S_el = 0
             S_el_list.append(S_el)
-            
+
+            integrand = np.zeros_like(energy_fit)
+            integrand_list.append(integrand)
+
         elif temperature > 0:
-            chemical_potential = calculate_chemical_potential(energy, dos, temperature)
-            fermi_dist = fermi_dirac_distribution(energy, chemical_potential, temperature)
+            chemical_potential = calculate_chemical_potential(
+                energy_fit, dos_fit, temperature
+            )
+            fermi_dist = fermi_dirac_distribution(
+                energy_fit, chemical_potential, temperature
+            )
 
             # The limit of f ln f + (1-f) ln (1-f) as f approaches 0 or 1 is 0
             mask = (fermi_dist == 0) | (fermi_dist == 1)
             integrand = np.zeros_like(fermi_dist)
-            integrand[~mask] = dos[~mask] * (
+            integrand[~mask] = dos_fit[~mask] * (
                 fermi_dist[~mask] * np.log(fermi_dist[~mask])
                 + (1 - fermi_dist[~mask]) * np.log(1 - fermi_dist[~mask])
             )
             integrand[mask] = 0
+            integrand_list.append(integrand)
 
-            S_el = -BOLTZMANN_CONSTANT * np.trapz(integrand, energy)
+            S_el = -BOLTZMANN_CONSTANT * np.trapz(integrand, energy_fit)
             S_el_list.append(S_el)
 
     if plot:
-        plot_entropy_integral(energy, integrand)
+        for plot_temperature in plot_temperatures:
+            index = np.where(temperature_range == plot_temperature)[0][0]
+            plot_entropy_integral(energy_fit, integrand_list[index], plot_temperature)
 
     return S_el_list
 
 
-def plot_entropy_integral(energy: np.ndarray, integrand: np.ndarray):
+def plot_entropy_integral(
+    energy: np.ndarray, integrand: np.ndarray, plot_temperature: float
+):
     """Plots the integrand vs energy of the entropy equation
 
     Args:
         energy (np.ndarray): energy values from the electron DOS
         integrand (np.ndarray): integrand from the entropy equation
+        plot_temperature (float): temperature
     """
 
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(x=energy, y=-BOLTZMANN_CONSTANT * integrand, mode="markers")
+    )
+    fig.update_layout(
+        title=dict(
+            text=f"T = {plot_temperature} K",
+            font=dict(size=20, color="rgb(0,0,0)"),
+        ),
+        margin=dict(t=130),
     )
     plot_format(fig, xtitle="E - E<sub>F</sub> (eV)", ytitle="S<sub>el</sub> integrand")
     fig.show()
@@ -392,7 +531,10 @@ def calculate_heat_capacity(
     energy: pd.Series | np.ndarray,
     dos: pd.Series | np.ndarray,
     temperature_range: np.ndarray,
+    energy_range: list[float, float] = [-2, 2],
+    resolution: float = 0.0001,
     plot=False,
+    plot_temperatures: np.ndarray = None,
 ) -> list:
     """Calculates the thermal electronic contribution to the heat capacity
 
@@ -400,7 +542,10 @@ def calculate_heat_capacity(
         energy (pd.Series | np.ndarray): energy values from the electron DOS
         dos (pd.Series | np.ndarray): electron DOS values
         temperature_range (np.ndarray): temperature range
+        energy_range (list[float, float], optional): energy range to fit the electron DOS. Defaults to [-2, 2].
+        resolution (float, optional): energy resolution for the spline. Defaults to 0.0001.
         plot (bool, optional): plots the integrand vs energy of the heat capacity equation. Defaults to False.
+        plot_temperatures (np.ndarray, optional): temperatures to plot the integrand vs energy of the heat capacity equation. Defaults to None.
 
     Returns:
         list: thermal electronic contribution to the heat capacity
@@ -412,45 +557,76 @@ def calculate_heat_capacity(
     if isinstance(dos, pd.Series):
         dos = dos.values[0]
 
+    energy_fit, dos_fit = fit_electron_dos(energy, dos, energy_range, resolution)
+
+    integrand_list = []
     Cv_el_list = []
+
     for temperature in temperature_range:
         if temperature == 0:
             Cv_el = 0
             Cv_el_list.append(Cv_el)
 
+            integrand = np.zeros_like(energy_fit)
+            integrand_list.append(integrand)
+
         elif temperature > 0:
-            chemical_potential = calculate_chemical_potential(energy, dos, temperature)
-            fermi_dist = fermi_dirac_distribution(energy, chemical_potential, temperature)
+            chemical_potential = calculate_chemical_potential(
+                energy_fit, dos_fit, temperature
+            )
+            fermi_dist = fermi_dirac_distribution(
+                energy_fit, chemical_potential, temperature
+            )
 
             # The limit of (1 / f - 1) * (f * (E - mu) / T) ** 2 as f approaches 0 or 1 is 0
             mask = (fermi_dist == 0) | (fermi_dist == 1)
             integrand = np.zeros_like(fermi_dist)
-            integrand[~mask] = dos[~mask] * (
+            integrand[~mask] = dos_fit[~mask] * (
                 (1 / fermi_dist[~mask] - 1)
-                * (fermi_dist[~mask] * (energy[~mask] - chemical_potential) / temperature) ** 2
+                * (
+                    fermi_dist[~mask]
+                    * (energy_fit[~mask] - chemical_potential)
+                    / temperature
+                )
+                ** 2
                 / BOLTZMANN_CONSTANT
             )
             integrand[mask] = 0
-            
-            Cv_el = np.trapz(integrand, energy)
+            integrand_list.append(integrand)
+
+            Cv_el = np.trapz(integrand, energy_fit)
             Cv_el_list.append(Cv_el)
 
-        if plot:
-            plot_heat_capacity_integral(energy, integrand)
+    if plot:
+        for plot_temperature in plot_temperatures:
+            index = np.where(temperature_range == plot_temperature)[0][0]
+            plot_heat_capacity_integral(
+                energy_fit, integrand_list[index], plot_temperature
+            )
 
     return Cv_el_list
 
 
-def plot_heat_capacity_integral(energy: np.ndarray, integrand: np.ndarray):
+def plot_heat_capacity_integral(
+    energy: np.ndarray, integrand: np.ndarray, plot_temperature: float
+):
     """plots the integrand vs energy of the heat capacity equation
 
     Args:
         energy (np.ndarray): energy values from the electron DOS
         integrand (np.ndarray): integrand from the heat capacity equation
+        plot_temperature (float): temperature
     """
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=energy, y=integrand, mode="markers"))
+    fig.update_layout(
+        title=dict(
+            text=f"T = {plot_temperature} K",
+            font=dict(size=20, color="rgb(0,0,0)"),
+        ),
+        margin=dict(t=130),
+    )
     plot_format(
         fig, xtitle="E - E<sub>F</sub> (eV)", ytitle="C<sub>v,el</sub> integrand"
     )
@@ -491,7 +667,7 @@ def thermal_electronic(
     temperature_range: np.ndarray,
     order: int = 2,
     plot: bool = True,
-    selected_temperatures_plot: np.ndarray = None
+    selected_temperatures_plot: np.ndarray = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Calculates the thermal electronic properties
 
@@ -501,7 +677,7 @@ def thermal_electronic(
         order (int, optional): order of polynomial to fit thermal electronic properties vs. volume for a fixed temperature. Defaults to 2.
         plot (bool, optional): plots the thermal electronic properties vs. temperature and vs. volume. Defaults to True.
         selected_temperatures_plot (np.ndarray, optional): selected temperatures to plot. Defaults to None.
-        
+
     Returns:
         tuple[pd.DataFrame, pd.DataFrame]: dataframes containing the thermal electronic properties and the fitted thermal electronic properties
     """
@@ -554,7 +730,9 @@ def thermal_electronic(
 
     if plot == True:
         plot_thermal_electronic(thermal_electronic_properties)
-        plot_thermal_electronic_properties_fit(thermal_electronic_properties_fit, selected_temperatures_plot)
+        plot_thermal_electronic_properties_fit(
+            thermal_electronic_properties_fit, selected_temperatures_plot
+        )
 
     return thermal_electronic_properties, thermal_electronic_properties_fit
 
@@ -674,7 +852,7 @@ def fit_thermal_electronic(
 
 def plot_thermal_electronic_properties_fit(
     thermal_electronic_properties_fit: pd.DataFrame,
-    selected_temperatures_plot: np.ndarray = None
+    selected_temperatures_plot: np.ndarray = None,
 ):
     """Plots the fitted thermal electronic properties vs. volume for various fixed temperatures
 
@@ -688,12 +866,11 @@ def plot_thermal_electronic_properties_fit(
     if selected_temperatures_plot is None:
         indices = np.linspace(0, len(temperature_list) - 1, 5, dtype=int)
         selected_temperatures_plot = np.array([temperature_list[j] for j in indices])
-    
+
     y_values = [
         ("f_el", "f_el_fit"),
         ("s_el", "s_el_fit"),
         ("cv_el", "cv_el_fit"),
-
     ]
     for y_value, y_value_fit in y_values:
         fig = go.Figure()
@@ -713,7 +890,7 @@ def plot_thermal_electronic_properties_fit(
             f"rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, {1})"
             for color in colors
         ]
-        
+
         i = 0
         for i, temperature in enumerate(selected_temperatures_plot):
             x = thermal_electronic_properties_fit.loc[temperature]["volume"]
@@ -722,7 +899,7 @@ def plot_thermal_electronic_properties_fit(
             y_fit = thermal_electronic_properties_fit.loc[temperature][y_value_fit]
 
             color = colors[i % len(colors)]
-            
+
             fig.add_trace(
                 go.Scatter(
                     x=x,

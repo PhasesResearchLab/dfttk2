@@ -156,7 +156,41 @@ class MongoDBStorage:
 
         return document
 
-    def store_fvib(self, object_id: str, harmonic_properties_fit: pd.DataFrame):
+    def store_fvib_debye(self, object_id: str, debye_properties: pd.DataFrame):
+
+        natoms_debye = debye_properties["number_of_atoms"].unique()[0].item()
+        min_temperature = debye_properties["temperatures"].min().item()
+        max_temperature = debye_properties["temperatures"].max().item()
+        dT = debye_properties["temperatures"].diff().unique()[1].item()
+
+        volume_range = debye_properties["volume"].to_list()[0]
+        min_volume = min(volume_range)
+        max_volume = max(volume_range)
+
+        scaling_factor = debye_properties["scaling_factor"].unique()[0].item()
+        gruneisen_x = debye_properties["gruneisen_x"].unique()[0].item()
+
+        fvib_debye_data = {
+            "$set": {
+                "properties.Fvib debye": {
+                    "natoms debye": natoms_debye,
+                    "temperature": {
+                        "min": min_temperature,
+                        "max": max_temperature,
+                        "dT": dT,
+                    },
+                    "volume range": {"min": min_volume, "max": max_volume},
+                    "scaling factor": scaling_factor,
+                    "x": gruneisen_x,
+                }
+            }
+        }
+        document_id = ObjectId(object_id)
+        self.collection.update_one({"_id": document_id}, fvib_debye_data)
+
+        return fvib_debye_data
+
+    def store_fvib_phonons(self, object_id: str, harmonic_properties_fit: pd.DataFrame):
 
         # phonons
         phonon_folders = [
@@ -249,42 +283,41 @@ class MongoDBStorage:
             s_vib_coefficients[i] = s_vib_coefficients[i].coefficients.tolist()
             cv_vib_coefficients[i] = cv_vib_coefficients[i].coefficients.tolist()
 
-        fvib_data = {
+        fvib_phonons_data = {
             "$set": {
-                "properties.Fvib": {
-                    "phonons": {
-                        "natoms phonons": natoms_phonons,
-                        "VASP input": {
-                            "INCAR relax": incar_relax,
-                            "INCAR phonons": incar_phonons,
-                            "KPOINTS": kpoints.as_dict(),
-                            "POTCAR": potcar.as_dict(),
-                            "errors": error_dict,
-                        },
-                        "volume": volume_list,
-                        "POSCAR": poscar_list,
-                        "natoms harmonic": natoms_harmonic,
-                        "temperature": {
-                            "min": min_temperature,
-                            "max": max_temperature,
-                            "dT": dT,
-                        },
-                        "volume range": {"min": min_volume, "max": max_volume},
-                        "Fvib coefficients": f_vib_coefficients,
-                        "Svib coefficients": s_vib_coefficients,
-                        "Cv vib coefficients": cv_vib_coefficients,
+                "properties.Fvib phonons": {
+                    "natoms phonons": natoms_phonons,
+                    "VASP input": {
+                        "INCAR relax": incar_relax,
+                        "INCAR phonons": incar_phonons,
+                        "KPOINTS": kpoints.as_dict(),
+                        "POTCAR": potcar.as_dict(),
+                        "errors": error_dict,
                     },
+                    "volume": volume_list,
+                    "POSCAR": poscar_list,
+                    "natoms harmonic": natoms_harmonic,
+                    "temperature": {
+                        "min": min_temperature,
+                        "max": max_temperature,
+                        "dT": dT,
+                    },
+                    "volume range": {"min": min_volume, "max": max_volume},
+                    "Fvib coefficients": f_vib_coefficients,
+                    "Svib coefficients": s_vib_coefficients,
+                    "Cv vib coefficients": cv_vib_coefficients,
                 }
             }
         }
 
         document_id = ObjectId(object_id)
-        self.collection.update_one({"_id": document_id}, fvib_data)
+        self.collection.update_one({"_id": document_id}, fvib_phonons_data)
 
-        return fvib_data
+        return fvib_phonons_data
 
-    # Continue here
-    def store_fel(self, object_id: str, thermal_electronic_properties_fit: pd.DataFrame):
+    def store_fel(
+        self, object_id: str, thermal_electronic_properties_fit: pd.DataFrame
+    ):
 
         elec_folders = [
             f
@@ -297,7 +330,6 @@ class MongoDBStorage:
             os.path.join(self.path, elec_folders[0], "POSCAR.elec_dos")
         )
         natoms_elec = poscar.structure.num_sites
-   
 
         __, elec_folders_errors = custodian_errors_location(self.path)
         elec_folders_no_errors = [
@@ -347,12 +379,25 @@ class MongoDBStorage:
             )
             poscar_list.append(poscar.as_dict())
 
-        thermal_electronic_properties_fit_reset = thermal_electronic_properties_fit.reset_index()
-        min_temperature = thermal_electronic_properties_fit_reset["temperature"].min().item()
-        max_temperature = thermal_electronic_properties_fit_reset["temperature"].max().item()
-        dT = thermal_electronic_properties_fit_reset["temperature"].diff().unique()[1].item()
+        thermal_electronic_properties_fit_reset = (
+            thermal_electronic_properties_fit.reset_index()
+        )
+        min_temperature = (
+            thermal_electronic_properties_fit_reset["temperature"].min().item()
+        )
+        max_temperature = (
+            thermal_electronic_properties_fit_reset["temperature"].max().item()
+        )
+        dT = (
+            thermal_electronic_properties_fit_reset["temperature"]
+            .diff()
+            .unique()[1]
+            .item()
+        )
 
-        volume_range = thermal_electronic_properties_fit_reset["volume_fit"].to_list()[0]
+        volume_range = thermal_electronic_properties_fit_reset["volume_fit"].to_list()[
+            0
+        ]
         min_volume = min(volume_range)
         max_volume = max(volume_range)
 
@@ -365,7 +410,7 @@ class MongoDBStorage:
         f_el_coefficients = polynomial_data["f_el_poly"].to_list()
         s_el_coefficients = polynomial_data["s_el_poly"].to_list()
         cv_el_coefficients = polynomial_data["cv_el_poly"].to_list()
-        
+
         for i in range(len(f_el_coefficients)):
             f_el_coefficients[i] = f_el_coefficients[i].coefficients.tolist()
             s_el_coefficients[i] = s_el_coefficients[i].coefficients.tolist()
@@ -403,8 +448,14 @@ class MongoDBStorage:
 
         return fel_data
 
-        
-    def store_qha(self, object_id: str, quasi_harmonic_properties: pd.DataFrame, eos: str):
+    def store_qha(
+        self,
+        object_id: str,
+        quasi_harmonic_properties: pd.DataFrame,
+        doc_name: str,
+        include_tec: bool,
+        eos: str,
+    ):
 
         natoms = quasi_harmonic_properties["number_of_atoms"].unique()[0].item()
         pressure = quasi_harmonic_properties["pressure"].unique()[0].item()
@@ -433,7 +484,8 @@ class MongoDBStorage:
 
         qha_data = {
             "$set": {
-                "properties.QHA": {
+                f"properties.QHA {doc_name}": {
+                    "TEC": include_tec,
                     "natoms": natoms,
                     "pressure": pressure,
                     "temperature": {

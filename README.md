@@ -30,11 +30,11 @@ It is recommended to first set up a virtual environment using Conda:
 
 Clone the main brach of the repository:
     
-    git clone https://github.com/PhasesResearchLab/dfttk2.git
+    git clone https://github.com/PhasesResearchLab/dfttk.git
 
 Or clone a specific branch:
     
-    git clone -b <branch_name> https://github.com/PhasesResearchLab/dfttk2.git
+    git clone -b <branch_name> https://github.com/PhasesResearchLab/dfttk.git
 
   Then move to `dfttk` directory and install in editable (`-e`) mode.
 
